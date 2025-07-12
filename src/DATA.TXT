@@ -1,0 +1,272 @@
+
+ BACKEND LOGIC TO PERFORMED ----------------------------------------------
+
+      Overview of Requirements:
+      🎯 Functional Flow:
+      
+1:- User Registration:
+
+      Admin pre-registers user with fixed email.
+
+      No password at this stage.
+
+2:- Login Process:
+
+      User enters email.
+
+      If valid, a new one-time password (OTP-like) is generated and sent via email.
+
+      User uses that password to log in.
+
+      Password is valid only for one session.
+
+3:- Post-login (Dashboard):
+
+      User can create  event (with heading, description, multiple images).
+
+      User can add update or delete that  event .
+
+      User cannot create more than one event.
+
+      Delete only allowed at the time of add.
+
+// 📁 Folder Structure:
+// backend/
+// ├── controllers/
+// │   ├── authController.js
+// │   └── eventController.js
+// ├── models/
+// │   └── User.js
+// ├── routes/
+// │   ├── authRoutes.js
+// │   └── eventRoutes.js
+// ├── utils/
+// │   └── sendEmail.js
+// ├── uploads/
+// ├── .env
+// ├── server.js
+
+// 📁 Folder Structure:
+// backend/
+// ├── controllers/
+// │   ├── authController.js
+// │   └── eventController.js
+// ├── models/
+// │   └── User.js
+// ├── routes/
+// │   ├── authRoutes.js
+// │   └── eventRoutes.js
+// ├── utils/
+// │   └── sendEmail.js
+// ├── uploads/
+// ├── .env
+// ├── server.js
+
+// ✅ server.js
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const dotenv = require('dotenv');
+dotenv.config();
+
+const authRoutes = require('./routes/authRoutes');
+const eventRoutes = require('./routes/eventRoutes');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use('/uploads', express.static('uploads'));
+
+// Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/events', eventRoutes);
+
+// DB & Server Start
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => app.listen(5000, () => console.log('Server started on port 5000')))
+  .catch(err => console.error(err));
+
+
+// ✅ models/User.js
+const mongoose = require('mongoose');
+
+const userSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true },
+  tempPassword: String,
+  event: {
+    heading: String,
+    description: String,
+    images: [String],
+    createdAt: Date
+  }
+});
+
+module.exports = mongoose.model('User', userSchema);
+
+
+// ✅ utils/sendEmail.js
+const nodemailer = require('nodemailer');
+
+const sendEmail = async (to, password) => {
+  const transporter = nodemailer.createTransport({
+    service: 'Gmail',
+    auth: {
+      user: process.env.EMAIL,
+      pass: process.env.EMAIL_PASS
+    }
+  });
+
+  await transporter.sendMail({
+    from: 'Event Portal <your_email@gmail.com>',
+    to,
+    subject: 'Your One-Time Login Password',
+    text: `Use this password to log in: ${password}`
+  });
+};
+
+module.exports = sendEmail;
+
+
+// ✅ controllers/authController.js
+const User = require('../models/User');
+const sendEmail = require('../utils/sendEmail');
+const jwt = require('jsonwebtoken');
+
+exports.sendLoginPassword = async (req, res) => {
+  const { email } = req.body;
+  const user = await User.findOne({ email });
+  if (!user) return res.status(404).json({ message: 'Email not registered' });
+
+  const password = Math.floor(100000 + Math.random() * 900000).toString();
+  user.tempPassword = password;
+  await user.save();
+
+  await sendEmail(email, password);
+  res.status(200).json({ message: 'Password sent to email' });
+};
+
+exports.login = async (req, res) => {
+  const { email, password } = req.body;
+  const user = await User.findOne({ email });
+  if (!user || user.tempPassword !== password) return res.status(400).json({ message: 'Invalid credentials' });
+
+  user.tempPassword = null;
+  await user.save();
+
+  const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+  res.status(200).json({ token });
+};
+
+
+// ✅ controllers/eventController.js
+const User = require('../models/User');
+
+exports.getEvent = async (req, res) => {
+  const user = await User.findById(req.userId);
+  res.status(200).json(user.event);
+};
+
+exports.createEvent = async (req, res) => {
+  const user = await User.findById(req.userId);
+  if (user.event && user.event.heading) return res.status(403).json({ message: 'Event already created' });
+
+  const imagePaths = req.files.map(file => file.path);
+  user.event = {
+    heading: req.body.heading,
+    description: req.body.description,
+    images: imagePaths,
+    createdAt: new Date()
+  };
+
+  await user.save();
+  res.status(201).json(user.event);
+};
+
+exports.updateEvent = async (req, res) => {
+  const user = await User.findById(req.userId);
+  if (!user.event) return res.status(404).json({ message: 'No event found' });
+
+  user.event.heading = req.body.heading;
+  user.event.description = req.body.description;
+  if (req.files.length) user.event.images = req.files.map(file => file.path);
+  await user.save();
+
+  res.status(200).json(user.event);
+};
+
+exports.deleteEvent = async (req, res) => {
+  const user = await User.findById(req.userId);
+  if (!user.event) return res.status(404).json({ message: 'No event to delete' });
+
+  const now = new Date();
+  const diffMinutes = (now - new Date(user.event.createdAt)) / 60000;
+  if (diffMinutes > 10) return res.status(403).json({ message: 'Delete window expired' });
+
+  user.event = null;
+  await user.save();
+  res.status(200).json({ message: 'Event deleted' });
+};
+
+
+// ✅ middleware/authMiddleware.js
+const jwt = require('jsonwebtoken');
+
+module.exports = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).json({ message: 'Token missing' });
+
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.userId = decoded.userId;
+    next();
+  } catch (err) {
+    res.status(401).json({ message: 'Invalid token' });
+  }
+};
+
+
+// ✅ routes/authRoutes.js
+const express = require('express');
+const router = express.Router();
+const { sendLoginPassword, login } = require('../controllers/authController');
+
+router.post('/send-login-password', sendLoginPassword);
+router.post('/login', login);
+
+module.exports = router;
+
+
+// ✅ routes/eventRoutes.js
+const express = require('express');
+const router = express.Router();
+const auth = require('../middleware/authMiddleware');
+const multer = require('multer');
+const {
+  createEvent,
+  getEvent,
+  updateEvent,
+  deleteEvent
+} = require('../controllers/eventController');
+
+const storage = multer.diskStorage({
+  destination: 'uploads/',
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + '-' + file.originalname);
+  }
+});
+const upload = multer({ storage });
+
+router.get('/', auth, getEvent);
+router.post('/', auth, upload.array('images', 5), createEvent);
+router.put('/', auth, upload.array('images', 5), updateEvent);
+router.delete('/', auth, deleteEvent);
+
+module.exports = router;
+
+// ✅ .env file
+// MONGO_URI=mongodb://localhost:27017/otp-events
+// JWT_SECRET=yourjwtsecret
+// EMAIL=your_email@gmail.com
+// EMAIL_PASS=your_email_password
